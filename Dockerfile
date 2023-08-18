@@ -11,14 +11,13 @@ RUN apk add --no-cache git
 # build as PIE to take advantage of exploit mitigations
 ARG CGO_ENABLED=0
 ARG VERSION
-RUN go build -buildmode=pie -buildvcs=true -ldflags "-s -w -X main.version=${VERSION}" -trimpath -o go-project-template
+RUN go build -buildmode=pie -buildvcs=true -ldflags "-s -w -X main.version=${VERSION}" -trimpath -o go-cache-prune
 
 # pie-loader is built and scanned daily, we want the most recent version
 # hadolint ignore=DL3007
 FROM ghcr.io/capnspacehook/pie-loader:latest
-COPY --from=builder /build/go-project-template /go-project-template
+COPY --from=builder /build/go-cache-prune /go-cache-prune
 
 USER 1000:1000
 
-ENTRYPOINT [ "/go-project-template" ]
-CMD [ "-version" ]
+ENTRYPOINT [ "/go-cache-prune" ]
