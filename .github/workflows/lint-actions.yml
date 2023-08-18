@@ -1,0 +1,33 @@
+name: Lint workflows
+
+on:
+  push:
+    paths:
+      - ".github/workflows/*"
+
+  workflow_dispatch: {}
+
+jobs:
+  lint-workflows:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Export constant environmental variables
+        uses: cardinalby/export-env-action@v2
+        with:
+          envFile: .github/constants.env
+
+      - name: Install Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: ${{ env.GO_VERSION }}.x
+          check-latest: true
+
+      - name: Lint workflow files
+        run: |
+          echo "::add-matcher::.github/actionlint-matcher.json"
+          go install github.com/rhysd/actionlint/cmd/actionlint@latest
+          actionlint
