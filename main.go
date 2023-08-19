@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"io/fs"
-	"log"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -16,9 +15,8 @@ import (
 	"strings"
 	"sync"
 
+	actions "github.com/sethvargo/go-githubactions"
 	"github.com/tywkeene/go-fsevents"
-	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
 	"golang.org/x/mod/module"
 	"golang.org/x/sys/unix"
 )
@@ -75,7 +73,7 @@ func mainRetCode() int {
 
 	info, ok := debug.ReadBuildInfo()
 	if !ok {
-		log.Println("build information not found")
+		actions.Errorf("build information not found")
 		return 1
 	}
 
@@ -84,34 +82,16 @@ func mainRetCode() int {
 		return 0
 	}
 
-	// build logger
-	logCfg := zap.NewProductionConfig()
-	logCfg.Encoding = "console"
-	logCfg.OutputPaths = []string{logPath}
-	if debugLogs {
-		logCfg.Level.SetLevel(zap.DebugLevel)
-	}
-	logCfg.EncoderConfig.TimeKey = "time"
-	logCfg.EncoderConfig.EncodeTime = zapcore.RFC3339NanoTimeEncoder
-	logCfg.DisableCaller = true
-
-	l, err := logCfg.Build()
-	if err != nil {
-		log.Printf("error creating logger: %v", err)
-		return 1
-	}
-	logger := l.Sugar()
-
 	if noBuildCache && noModCache {
-		logger.Error("-only-mod-cache and -only-build-cache are mutually exclusive")
+		actions.Errorf("-only-mod-cache and -only-build-cache are mutually exclusive")
 		return 1
 	}
 	if noModCache && moduleCache != "" {
-		logger.Error("-mod-cache must be unset when -only-mod-cache is set")
+		actions.Errorf("-mod-cache must be unset when -only-mod-cache is set")
 		return 1
 	}
 	if noBuildCache && buildCache != "" {
-		logger.Error("-build-cache must be unset when -only-build-cache is set")
+		actions.Errorf("-build-cache must be unset when -only-build-cache is set")
 		return 1
 	}
 
@@ -120,23 +100,23 @@ func mainRetCode() int {
 	if signalProc {
 		pidBytes, err := os.ReadFile(pidFile)
 		if err != nil {
-			logger.Errorf("reading PID file: %v", err)
+			actions.Errorf("reading PID file: %v", err)
 			return 1
 		}
 		pid, err := strconv.Atoi(string(pidBytes))
 		if err != nil {
-			logger.Errorf("parsing PID from PID file: %v", err)
+			actions.Errorf("parsing PID from PID file: %v", err)
 			return 1
 		}
 
 		p, _ := os.FindProcess(pid) // always succeeds for Unix systems
 		if err := p.Signal(unix.SIGHUP); err != nil {
-			logger.Errorf("signaling go-cache-prune process: %v", err)
+			actions.Errorf("signaling go-cache-prune process: %v", err)
 			return 1
 		}
 
 		if _, err := p.Wait(); err != nil {
-			logger.Errorf("waiting for signaling go-cache-prune process to complete: %v", err)
+			actions.Errorf("waiting for signaling go-cache-prune process to complete: %v", err)
 			return 1
 		}
 
@@ -144,7 +124,7 @@ func mainRetCode() int {
 	}
 
 	if _, err := os.Stat(pidFile); err == nil {
-		logger.Error("go-cache-prune is already running")
+		actions.Errorf("go-cache-prune is already running")
 		return 1
 	}
 
@@ -152,17 +132,18 @@ func mainRetCode() int {
 	defer mainCancel()
 
 	// if the caches weren't explicitly passed, get them
+	var err error
 	if !noModCache && moduleCache == "" {
 		moduleCache, err = getGoEnv(mainCtx, "GOMODCACHE")
 		if err != nil {
-			logger.Errorf("getting GOMODCACHE: %v", err)
+			actions.Errorf("getting GOMODCACHE: %v", err)
 			return 1
 		}
 	}
 	if !noBuildCache && buildCache == "" {
 		buildCache, err = getGoEnv(mainCtx, "GOCACHE")
 		if err != nil {
-			logger.Errorf("getting GOCACHE: %v", err)
+			actions.Errorf("getting GOCACHE: %v", err)
 			return 1
 		}
 	}
@@ -170,9 +151,9 @@ func mainRetCode() int {
 	if !noPIDFile {
 		// create PID file
 		pidBytes := []byte(strconv.Itoa(os.Getpid()))
-		err = os.WriteFile(pidFile, pidBytes, 0o440)
+		err := os.WriteFile(pidFile, pidBytes, 0o440)
 		if err != nil {
-			logger.Errorf("creating PID file: %v", err)
+			actions.Errorf("creating PID file: %v", err)
 			return 1
 		}
 		defer os.Remove(pidFile)
@@ -182,27 +163,28 @@ func mainRetCode() int {
 	watchCtx, watchCancel := signal.NotifyContext(mainCtx, unix.SIGHUP)
 	defer watchCancel()
 
-	logger.Infof("starting %s at version %s", projectName, version)
+	actions.Infof("starting %s at version %s", projectName, version)
 
-	modFiles, buildFiles, err := watchCaches(watchCtx, logger, moduleCache, buildCache)
+	modFiles, buildFiles, err := watchCaches(watchCtx, moduleCache, buildCache)
 	if err != nil {
-		logger.Errorf("watching caches", zap.Error(err))
+		actions.Errorf("watching caches: %v", err)
 		return 1
 	}
+	actions.EndGroup()
 
 	if mainCtx.Err() != nil {
-		logger.Info("signal received, shutting down without pruning caches")
+		actions.Infof("signal received, shutting down without pruning caches")
 		return 2
 	}
 
 	if len(modFiles) == 0 && len(buildFiles) == 0 {
-		logger.Info("no cached files were used, nothing to do")
+		actions.Infof("no cached files were used, nothing to do")
 		return 2
 	}
 
-	err = pruneCaches(logger, modFiles, buildFiles, moduleCache, buildCache)
+	err = pruneCaches(modFiles, buildFiles, moduleCache, buildCache)
 	if err != nil {
-		logger.Errorf("pruning caches: %v", err)
+		actions.Errorf("pruning caches: %v", err)
 		return 1
 	}
 
@@ -225,7 +207,10 @@ func getGoEnv(ctx context.Context, name string) (string, error) {
 
 type usedCacheFiles map[string]struct{}
 
-func watchCaches(ctx context.Context, logger *zap.SugaredLogger, modCache, buildCache string) (usedCacheFiles, usedCacheFiles, error) {
+func watchCaches(ctx context.Context, modCache, buildCache string) (usedCacheFiles, usedCacheFiles, error) {
+	actions.Group("Recording used cache files")
+	defer actions.EndGroup()
+
 	var (
 		modFiles      usedCacheFiles
 		buildFiles    usedCacheFiles
@@ -238,7 +223,7 @@ func watchCaches(ctx context.Context, logger *zap.SugaredLogger, modCache, build
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			modFiles, watchModErr = watchCache(ctx, logger, true, modCache)
+			modFiles, watchModErr = watchCache(ctx, true, modCache)
 			if watchModErr != nil {
 				watchModErr = fmt.Errorf("watching module cache: %w", watchModErr)
 			}
@@ -248,7 +233,7 @@ func watchCaches(ctx context.Context, logger *zap.SugaredLogger, modCache, build
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			buildFiles, watchBuildErr = watchCache(ctx, logger, false, buildCache)
+			buildFiles, watchBuildErr = watchCache(ctx, false, buildCache)
 			if watchBuildErr != nil {
 				watchModErr = fmt.Errorf("watching build cache: %w", watchBuildErr)
 			}
@@ -264,8 +249,8 @@ func watchCaches(ctx context.Context, logger *zap.SugaredLogger, modCache, build
 	return modFiles, buildFiles, nil
 }
 
-func watchCache(ctx context.Context, logger *zap.SugaredLogger, isModCache bool, dir string) (usedCacheFiles, error) {
-	logger.Infof("creating watches for cache dir %q", dir)
+func watchCache(ctx context.Context, isModCache bool, dir string) (usedCacheFiles, error) {
+	actions.Infof("creating watches for cache dir %q", dir)
 
 	watcher, err := fsevents.NewWatcher()
 	if err != nil {
@@ -289,14 +274,14 @@ func watchCache(ctx context.Context, logger *zap.SugaredLogger, isModCache bool,
 				}
 			}
 
-			logger.Debugf("added watch for %q", depDir)
+			actions.Debugf("added watch for %q", depDir)
 			return filepath.SkipDir
 		} else if d.IsDir() {
 			_, err := watcher.AddDescriptor(path, mask)
 			if err != nil {
 				return fmt.Errorf("adding watch for %s: %w", path, err)
 			}
-			logger.Debugf("added watch for %q", path)
+			actions.Debugf("added watch for %q", path)
 		}
 
 		return nil
@@ -308,7 +293,12 @@ func watchCache(ctx context.Context, logger *zap.SugaredLogger, isModCache bool,
 	if err := watcher.StartAll(); err != nil {
 		return nil, fmt.Errorf("starting to watch files: %w", err)
 	}
-	defer watcher.StopAll()
+	defer func() {
+		err := watcher.StopAll()
+		if err != nil {
+			actions.Warningf("stopping file watchers: %v", err)
+		}
+	}()
 
 	go watcher.Watch()
 
@@ -322,14 +312,14 @@ func watchCache(ctx context.Context, logger *zap.SugaredLogger, isModCache bool,
 			}
 
 			created := fsevents.CheckMask(fsevents.Create, event.RawEvent.Mask)
-			logger.Debugf("got event: path=%q created=%t", event.Path, created)
+			actions.Debugf("got event: path=%q created=%t", event.Path, created)
 
 			usedFiles[event.Path] = struct{}{}
 		case err, ok := <-watcher.Errors:
 			if !ok {
 				return nil, errors.New("file watcher error channel closed")
 			}
-			logger.Errorf("file watcher: %w", err)
+			actions.Errorf("file watcher: %v", err)
 		case <-ctx.Done():
 			return usedFiles, nil
 		}
@@ -354,12 +344,15 @@ func dependencyDir(path string, d fs.DirEntry) (string, bool) {
 	return "", false
 }
 
-func pruneCaches(logger *zap.SugaredLogger, modFiles, buildFiles usedCacheFiles, modCache, buildCache string) error {
+func pruneCaches(modFiles, buildFiles usedCacheFiles, modCache, buildCache string) error {
+	actions.Group("Pruning cache files")
+	defer actions.EndGroup()
+
 	var deletedFiles uint
 	newWalkFunc := func(root string, isModCache bool) fs.WalkDirFunc {
 		return func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
-				logger.Warnf("walking %q at %q: %v", root, path, err)
+				actions.Warningf("walking %q at %q: %v", root, path, err)
 			}
 			if path == root {
 				return nil
@@ -373,20 +366,20 @@ func pruneCaches(logger *zap.SugaredLogger, modFiles, buildFiles usedCacheFiles,
 					}
 					err := os.RemoveAll(depDir)
 					if err != nil {
-						logger.Warnf("deleting directory from module cache: %v", err)
+						actions.Warningf("deleting directory from module cache: %v", err)
 						return nil
 					}
-					logger.Debugf("deleted directory %q from module cache", depDir)
+					actions.Debugf("deleted directory %q from module cache", depDir)
 					deletedFiles++
 				}
 			} else if !d.IsDir() {
 				if _, ok := buildFiles[path]; !ok {
 					err := os.Remove(path)
 					if err != nil {
-						logger.Warnf("deleting file from build cache: %v", err)
+						actions.Warningf("deleting file from build cache: %v", err)
 						return nil
 					}
-					logger.Debugf("deleted file %q from build cache", path)
+					actions.Debugf("deleted file %q from build cache", path)
 					deletedFiles++
 				}
 			}
@@ -398,14 +391,14 @@ func pruneCaches(logger *zap.SugaredLogger, modFiles, buildFiles usedCacheFiles,
 	var walkModErr error
 	if modCache != "" {
 		walkModErr = filepath.WalkDir(modCache, newWalkFunc(modCache, true))
-		logger.Infof("deleted %d directories from module cache", deletedFiles)
+		actions.Infof("deleted %d directories from module cache", deletedFiles)
 		deletedFiles = 0
 	}
 
 	var walkBuildErr error
 	if buildCache != "" {
 		walkBuildErr = filepath.WalkDir(buildCache, newWalkFunc(buildCache, false))
-		logger.Infof("deleted %d files from build cache", deletedFiles)
+		actions.Infof("deleted %d files from build cache", deletedFiles)
 	}
 
 	return errors.Join(walkModErr, walkBuildErr)
