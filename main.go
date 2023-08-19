@@ -359,7 +359,7 @@ func pruneCaches(logger *zap.SugaredLogger, modFiles, buildFiles usedCacheFiles,
 	newWalkFunc := func(root string, isModCache bool) fs.WalkDirFunc {
 		return func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
-				return err
+				logger.Warnf("walking %q at %q: %v", root, path, err)
 			}
 			if path == root {
 				return nil
@@ -373,9 +373,10 @@ func pruneCaches(logger *zap.SugaredLogger, modFiles, buildFiles usedCacheFiles,
 					}
 					err := os.RemoveAll(depDir)
 					if err != nil {
-						logger.Warnf("deleting dir from module cache: %v", err)
+						logger.Warnf("deleting directory from module cache: %v", err)
+						return nil
 					}
-					logger.Debugf("deleted dir %q from module cache", depDir)
+					logger.Debugf("deleted directory %q from module cache", depDir)
 					deletedFiles++
 				}
 			} else if !d.IsDir() {
@@ -383,6 +384,7 @@ func pruneCaches(logger *zap.SugaredLogger, modFiles, buildFiles usedCacheFiles,
 					err := os.Remove(path)
 					if err != nil {
 						logger.Warnf("deleting file from build cache: %v", err)
+						return nil
 					}
 					logger.Debugf("deleted file %q from build cache", path)
 					deletedFiles++
@@ -396,7 +398,7 @@ func pruneCaches(logger *zap.SugaredLogger, modFiles, buildFiles usedCacheFiles,
 	var walkModErr error
 	if modCache != "" {
 		walkModErr = filepath.WalkDir(modCache, newWalkFunc(modCache, true))
-		logger.Infof("deleted %d files from module cache", deletedFiles)
+		logger.Infof("deleted %d directories from module cache", deletedFiles)
 		deletedFiles = 0
 	}
 
