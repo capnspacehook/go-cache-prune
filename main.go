@@ -30,11 +30,9 @@ const (
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `
-<Project description>
+Prune unused files in Go module and build caches
 
 go-cache-prune [flags]
-
-<Project details/usage>
 
 %s accepts the following flags:
 
@@ -58,6 +56,7 @@ func mainRetCode() int {
 		buildCache   string
 		noModCache   bool
 		noBuildCache bool
+		noPIDFile    bool
 		signalProc   bool
 		printVersion bool
 	)
@@ -69,6 +68,7 @@ func mainRetCode() int {
 	flag.StringVar(&buildCache, "build-cache", "", "path to Go build cache")
 	flag.BoolVar(&noBuildCache, "only-mod-cache", false, "only prune the module cache, and not the build cache")
 	flag.BoolVar(&noModCache, "only-build-cache", false, "only prune the build cache, and not the module cache")
+	flag.BoolVar(&noPIDFile, "no-pid-file", false, "don't create a PID file")
 	flag.BoolVar(&signalProc, "signal", false, "signal a running go-cache-prune to start pruning")
 	flag.BoolVar(&printVersion, "version", false, "print version and build information and exit")
 	flag.Parse()
@@ -167,14 +167,16 @@ func mainRetCode() int {
 		}
 	}
 
-	// create PID file
-	pidBytes := []byte(strconv.Itoa(os.Getpid()))
-	err = os.WriteFile(pidFile, pidBytes, 0o440)
-	if err != nil {
-		logger.Errorf("creating PID file: %v", err)
-		return 1
+	if !noPIDFile {
+		// create PID file
+		pidBytes := []byte(strconv.Itoa(os.Getpid()))
+		err = os.WriteFile(pidFile, pidBytes, 0o440)
+		if err != nil {
+			logger.Errorf("creating PID file: %v", err)
+			return 1
+		}
+		defer os.Remove(pidFile)
 	}
-	defer os.Remove(pidFile)
 
 	// stop watching on SIGHUP
 	watchCtx, watchCancel := signal.NotifyContext(mainCtx, unix.SIGHUP)
