@@ -371,8 +371,7 @@ func pruneCaches(modFiles, buildFiles usedCacheFiles, modCache, buildCache strin
 	actions.Group("Pruning cache files")
 	defer actions.EndGroup()
 
-	var deletedFiles uint
-	newWalkFunc := func(root string, isModCache bool) fs.WalkDirFunc {
+	newWalkFunc := func(root string, isModCache bool, deletedCounter *uint) fs.WalkDirFunc {
 		return func(path string, d fs.DirEntry, err error) error {
 			// ignore file not found errors, most will be because
 			// module cache dirs were recursively deleted
@@ -395,7 +394,7 @@ func pruneCaches(modFiles, buildFiles usedCacheFiles, modCache, buildCache strin
 						return nil
 					}
 					actions.Debugf("deleted directory %q from module cache", depDir)
-					deletedFiles++
+					*deletedCounter++
 				}
 			} else if !d.IsDir() {
 				if _, ok := buildFiles[path]; !ok {
@@ -405,7 +404,7 @@ func pruneCaches(modFiles, buildFiles usedCacheFiles, modCache, buildCache strin
 						return nil
 					}
 					actions.Debugf("deleted file %q from build cache", path)
-					deletedFiles++
+					*deletedCounter++
 				}
 			}
 
@@ -413,18 +412,33 @@ func pruneCaches(modFiles, buildFiles usedCacheFiles, modCache, buildCache strin
 		}
 	}
 
+	var wg sync.WaitGroup
+
 	var walkModErr error
 	if modCache != "" {
-		walkModErr = filepath.WalkDir(modCache, newWalkFunc(modCache, true))
-		actions.Infof("deleted %d directories from module cache", deletedFiles)
-		deletedFiles = 0
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			var deletedModDirs uint
+			walkModErr = filepath.WalkDir(modCache, newWalkFunc(modCache, true, &deletedModDirs))
+			actions.Infof("deleted %d directories from module cache", deletedModDirs)
+		}()
 	}
 
 	var walkBuildErr error
 	if buildCache != "" {
-		walkBuildErr = filepath.WalkDir(buildCache, newWalkFunc(buildCache, false))
-		actions.Infof("deleted %d files from build cache", deletedFiles)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			var deletedBuildFiles uint
+			walkBuildErr = filepath.WalkDir(buildCache, newWalkFunc(buildCache, false, &deletedBuildFiles))
+			actions.Infof("deleted %d files from build cache", deletedBuildFiles)
+		}()
 	}
+
+	wg.Wait()
 
 	return errors.Join(walkModErr, walkBuildErr)
 }
