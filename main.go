@@ -205,7 +205,7 @@ func mainErr() error {
 		return errJustExit(2)
 	}
 
-	pruneCaches(modFiles, buildFiles, cfg.moduleCache, cfg.buildCache)
+	pruneCaches(cfg.moduleCache, cfg.buildCache, modFiles, buildFiles)
 
 	return nil
 }
@@ -292,7 +292,7 @@ func watchCache(ctx context.Context, isModCache bool, dir string) (usedCacheFile
 					// but this won't adversely effect anything so ignore
 					// the error
 					if !errors.Is(err, fsevents.ErrDescAlreadyExists) {
-						return fmt.Errorf("adding watch for %s: %w", depDir, err)
+						return fmt.Errorf("adding watch for %q: %w", depDir, err)
 					}
 				}
 			}
@@ -302,7 +302,7 @@ func watchCache(ctx context.Context, isModCache bool, dir string) (usedCacheFile
 		} else if d.IsDir() {
 			_, err := watcher.AddDescriptor(path, mask)
 			if err != nil {
-				return fmt.Errorf("adding watch for %s: %w", path, err)
+				return fmt.Errorf("adding watch for %q: %w", path, err)
 			}
 			actions.Debugf("added watch for %q", path)
 		}
@@ -310,7 +310,7 @@ func watchCache(ctx context.Context, isModCache bool, dir string) (usedCacheFile
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("walking %s: %w", dir, err)
+		return nil, fmt.Errorf("walking %q: %w", dir, err)
 	}
 
 	if err := watcher.StartAll(); err != nil {
@@ -337,7 +337,20 @@ func watchCache(ctx context.Context, isModCache bool, dir string) (usedCacheFile
 			created := fsevents.CheckMask(fsevents.Create, event.RawEvent.Mask)
 			actions.Debugf("got event: path=%q created=%t", event.Path, created)
 
-			usedFiles[event.Path] = struct{}{}
+			isDirEvent := event.IsDirEvent()
+			if isModCache && isDirEvent || !isModCache && !isDirEvent {
+				usedFiles[event.Path] = struct{}{}
+			}
+			if !isModCache && isDirEvent && event.IsDirCreated() {
+				dscr, err := watcher.AddDescriptor(event.Path, mask)
+				if err != nil {
+					actions.Errorf("adding watch for %q: %v", event.Path, err)
+					continue
+				}
+				if err := dscr.Start(); err != nil {
+					actions.Errorf("starting to watch directory %q: %v", event.Path, err)
+				}
+			}
 		case err, ok := <-watcher.Errors:
 			if !ok {
 				return nil, errors.New("file watcher error channel closed")
@@ -364,11 +377,38 @@ func dependencyDir(path string, d fs.DirEntry) (string, bool) {
 	return "", false
 }
 
-func pruneCaches(modFiles, buildFiles usedCacheFiles, modCache, buildCache string) {
+func pruneCaches(modCache, buildCache string, modFiles, buildFiles usedCacheFiles) {
 	actions.Group("Pruning cache files")
 	defer actions.EndGroup()
 
-	newWalkFunc := func(root string, isModCache bool, deletedCounter *uint) fs.WalkDirFunc {
+	var wg sync.WaitGroup
+
+	if modCache != "" {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			d := pruneCache(modCache, true, modFiles)
+			actions.Infof("deleted %d directories from module cache", d)
+		}()
+	}
+
+	if buildCache != "" {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			d := pruneCache(buildCache, false, buildFiles)
+			actions.Infof("deleted %d files from build cache", d)
+		}()
+	}
+
+	wg.Wait()
+}
+
+func pruneCache(dir string, isModCache bool, usedFiles usedCacheFiles) uint {
+	var deletedCtr uint
+	newWalkFunc := func(root string) fs.WalkDirFunc {
 		return func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				// ignore file not found errors, most will be because
@@ -388,7 +428,7 @@ func pruneCaches(modFiles, buildFiles usedCacheFiles, modCache, buildCache strin
 				if !ok {
 					return nil
 				}
-				if _, ok := modFiles[depDir]; ok {
+				if _, ok := usedFiles[depDir]; ok {
 					return nil
 				}
 
@@ -400,9 +440,13 @@ func pruneCaches(modFiles, buildFiles usedCacheFiles, modCache, buildCache strin
 					return nil
 				}
 				actions.Debugf("deleted directory %q from module cache", depDir)
-				*deletedCounter++
+				deletedCtr++
 			} else if !d.IsDir() {
-				if _, ok := buildFiles[path]; ok {
+				if _, ok := usedFiles[path]; ok {
+					return nil
+				}
+				// leave this file these files to make testing easier
+				if d.Name() == "trim.txt" || d.Name() == "README" {
 					return nil
 				}
 
@@ -412,39 +456,15 @@ func pruneCaches(modFiles, buildFiles usedCacheFiles, modCache, buildCache strin
 					return nil
 				}
 				actions.Debugf("deleted file %q from build cache", path)
-				*deletedCounter++
-
+				deletedCtr++
 			}
 
 			return nil
 		}
 	}
 
-	var wg sync.WaitGroup
-
-	if modCache != "" {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-
-			var deletedModDirs uint
-			_ = filepath.WalkDir(modCache, newWalkFunc(modCache, true, &deletedModDirs))
-			actions.Infof("deleted %d directories from module cache", deletedModDirs)
-		}()
-	}
-
-	if buildCache != "" {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-
-			var deletedBuildFiles uint
-			_ = filepath.WalkDir(buildCache, newWalkFunc(buildCache, false, &deletedBuildFiles))
-			actions.Infof("deleted %d files from build cache", deletedBuildFiles)
-		}()
-	}
-
-	wg.Wait()
+	_ = filepath.WalkDir(dir, newWalkFunc(dir))
+	return deletedCtr
 }
 
 func chmodDir(dir string) {
