@@ -205,10 +205,7 @@ func mainErr() error {
 		return errJustExit(2)
 	}
 
-	err = pruneCaches(modFiles, buildFiles, cfg.moduleCache, cfg.buildCache)
-	if err != nil {
-		return fmt.Errorf("pruning caches: %w", err)
-	}
+	pruneCaches(modFiles, buildFiles, cfg.moduleCache, cfg.buildCache)
 
 	return nil
 }
@@ -367,7 +364,7 @@ func dependencyDir(path string, d fs.DirEntry) (string, bool) {
 	return "", false
 }
 
-func pruneCaches(modFiles, buildFiles usedCacheFiles, modCache, buildCache string) error {
+func pruneCaches(modFiles, buildFiles usedCacheFiles, modCache, buildCache string) {
 	actions.Group("Pruning cache files")
 	defer actions.EndGroup()
 
@@ -376,7 +373,8 @@ func pruneCaches(modFiles, buildFiles usedCacheFiles, modCache, buildCache strin
 			// ignore file not found errors, most will be because
 			// module cache dirs were recursively deleted
 			if err != nil && (isModCache && !errors.Is(err, os.ErrNotExist)) {
-				actions.Warningf("walking %q at %q: %v", root, path, err)
+				actions.Warningf("walking %q: %v", path, err)
+				return nil
 			}
 			if path == root {
 				return nil
@@ -384,28 +382,35 @@ func pruneCaches(modFiles, buildFiles usedCacheFiles, modCache, buildCache strin
 
 			if isModCache {
 				depDir, ok := dependencyDir(path, d)
-				if ok {
-					if _, ok := modFiles[depDir]; ok {
-						return nil
-					}
-					err := os.RemoveAll(depDir)
-					if err != nil {
-						actions.Warningf("deleting directory from module cache: %v", err)
-						return nil
-					}
-					actions.Debugf("deleted directory %q from module cache", depDir)
-					*deletedCounter++
+				if !ok {
+					return nil
 				}
+				if _, ok := modFiles[depDir]; ok {
+					return nil
+				}
+
+				// allow module files to be deleted
+				chmodDir(depDir)
+				err := os.RemoveAll(depDir)
+				if err != nil {
+					actions.Warningf("deleting directory from module cache: %v", err)
+					return nil
+				}
+				actions.Debugf("deleted directory %q from module cache", depDir)
+				*deletedCounter++
 			} else if !d.IsDir() {
-				if _, ok := buildFiles[path]; !ok {
-					err := os.Remove(path)
-					if err != nil {
-						actions.Warningf("deleting file from build cache: %v", err)
-						return nil
-					}
-					actions.Debugf("deleted file %q from build cache", path)
-					*deletedCounter++
+				if _, ok := buildFiles[path]; ok {
+					return nil
 				}
+
+				err := os.Remove(path)
+				if err != nil {
+					actions.Warningf("deleting file from build cache: %v", err)
+					return nil
+				}
+				actions.Debugf("deleted file %q from build cache", path)
+				*deletedCounter++
+
 			}
 
 			return nil
@@ -414,31 +419,42 @@ func pruneCaches(modFiles, buildFiles usedCacheFiles, modCache, buildCache strin
 
 	var wg sync.WaitGroup
 
-	var walkModErr error
 	if modCache != "" {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 
 			var deletedModDirs uint
-			walkModErr = filepath.WalkDir(modCache, newWalkFunc(modCache, true, &deletedModDirs))
+			_ = filepath.WalkDir(modCache, newWalkFunc(modCache, true, &deletedModDirs))
 			actions.Infof("deleted %d directories from module cache", deletedModDirs)
 		}()
 	}
 
-	var walkBuildErr error
 	if buildCache != "" {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 
 			var deletedBuildFiles uint
-			walkBuildErr = filepath.WalkDir(buildCache, newWalkFunc(buildCache, false, &deletedBuildFiles))
+			_ = filepath.WalkDir(buildCache, newWalkFunc(buildCache, false, &deletedBuildFiles))
 			actions.Infof("deleted %d files from build cache", deletedBuildFiles)
 		}()
 	}
 
 	wg.Wait()
+}
 
-	return errors.Join(walkModErr, walkBuildErr)
+func chmodDir(dir string) {
+	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			actions.Warningf("walking %q: %v", path, err)
+			return nil
+		}
+
+		if err := os.Chmod(path, 0o777); err != nil {
+			actions.Warningf("changing permissions of %q: %v", path, err)
+		}
+
+		return nil
+	})
 }
