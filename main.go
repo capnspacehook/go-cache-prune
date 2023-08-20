@@ -81,7 +81,7 @@ func parseFlags() (*config, error) {
 	flag.StringVar(&cfg.buildCache, "build-cache", "", "path to Go build cache")
 	flag.BoolVar(&cfg.pruneModCache, "prune-mod-cache", true, "prune the Go module cache")
 	flag.BoolVar(&cfg.pruneBuildCache, "prune-build-cache", true, "prune the Go build cache")
-	flag.BoolVar(&cfg.usePIDFile, "pid-file", true, "create a PID file")
+	flag.BoolVar(&cfg.usePIDFile, "pid-file", false, "create a PID file")
 	flag.BoolVar(&cfg.signalProc, "signal", false, "signal a running go-cache-prune to start pruning")
 	flag.BoolVar(&printVersion, "version", false, "print version and build information and exit")
 	flag.Parse()
