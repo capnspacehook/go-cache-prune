@@ -9,7 +9,7 @@ WORKDIR /build
 RUN apk add --no-cache git
 
 ARG CGO_ENABLED=0
-ARG VERSION
+ARG VERSION=devel
 RUN go build -buildvcs=true -ldflags "-s -w -X main.version=${VERSION}" -trimpath -o go-cache-prune
 
 FROM scratch

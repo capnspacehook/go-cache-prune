@@ -18,6 +18,7 @@ import (
 	actions "github.com/sethvargo/go-githubactions"
 	"github.com/tywkeene/go-fsevents"
 	"golang.org/x/mod/module"
+	"golang.org/x/mod/semver"
 	"golang.org/x/sys/unix"
 )
 
@@ -48,25 +49,21 @@ func main() {
 
 func mainRetCode() int {
 	var (
-		debugLogs    bool
-		logPath      string
 		moduleCache  string
 		buildCache   string
 		noModCache   bool
 		noBuildCache bool
-		noPIDFile    bool
+		usePIDFile   bool
 		signalProc   bool
 		printVersion bool
 	)
 
 	flag.Usage = usage
-	flag.BoolVar(&debugLogs, "debug", false, "enable debug logging")
-	flag.StringVar(&logPath, "l", "stdout", "path to log to")
 	flag.StringVar(&moduleCache, "mod-cache", "", "path to Go module cache")
 	flag.StringVar(&buildCache, "build-cache", "", "path to Go build cache")
 	flag.BoolVar(&noBuildCache, "only-mod-cache", false, "only prune the module cache, and not the build cache")
 	flag.BoolVar(&noModCache, "only-build-cache", false, "only prune the build cache, and not the module cache")
-	flag.BoolVar(&noPIDFile, "no-pid-file", false, "don't create a PID file")
+	flag.BoolVar(&usePIDFile, "pid-file", true, "create a PID file")
 	flag.BoolVar(&signalProc, "signal", false, "signal a running go-cache-prune to start pruning")
 	flag.BoolVar(&printVersion, "version", false, "print version and build information and exit")
 	flag.Parse()
@@ -123,9 +120,11 @@ func mainRetCode() int {
 		return 0
 	}
 
-	if _, err := os.Stat(pidFile); err == nil {
-		actions.Errorf("go-cache-prune is already running")
-		return 1
+	if usePIDFile {
+		if _, err := os.Stat(pidFile); err == nil {
+			actions.Errorf("go-cache-prune is already running")
+			return 1
+		}
 	}
 
 	mainCtx, mainCancel := signal.NotifyContext(context.Background(), os.Interrupt, unix.SIGTERM)
@@ -148,7 +147,7 @@ func mainRetCode() int {
 		}
 	}
 
-	if !noPIDFile {
+	if usePIDFile {
 		// create PID file
 		pidBytes := []byte(strconv.Itoa(os.Getpid()))
 		err := os.WriteFile(pidFile, pidBytes, 0o440)
@@ -163,7 +162,15 @@ func mainRetCode() int {
 	watchCtx, watchCancel := signal.NotifyContext(mainCtx, unix.SIGHUP)
 	defer watchCancel()
 
-	actions.Infof("starting %s at version %s", projectName, version)
+	// log current version and commit
+	var commit string
+	for _, buildSetting := range info.Settings {
+		if buildSetting.Key == "vcs.revision" {
+			commit = buildSetting.Value
+			break
+		}
+	}
+	actions.Infof("starting %s version=%s commit=%s", projectName, version, commit)
 
 	modFiles, buildFiles, err := watchCaches(watchCtx, moduleCache, buildCache)
 	if err != nil {
@@ -268,6 +275,10 @@ func watchCache(ctx context.Context, isModCache bool, dir string) (usedCacheFile
 			if ok {
 				_, err := watcher.AddDescriptor(depDir, mask)
 				if err != nil {
+					// we may attempt to add descriptors for the same
+					// dirs more than once due to how we match on 'go.mod',
+					// but this won't adversely effect anything so ignore
+					// the error
 					if !errors.Is(err, fsevents.ErrDescAlreadyExists) {
 						return fmt.Errorf("adding watch for %s: %w", depDir, err)
 					}
@@ -275,7 +286,7 @@ func watchCache(ctx context.Context, isModCache bool, dir string) (usedCacheFile
 			}
 
 			actions.Debugf("added watch for %q", depDir)
-			return filepath.SkipDir
+			return nil
 		} else if d.IsDir() {
 			_, err := watcher.AddDescriptor(path, mask)
 			if err != nil {
@@ -327,18 +338,15 @@ func watchCache(ctx context.Context, isModCache bool, dir string) (usedCacheFile
 }
 
 func dependencyDir(path string, d fs.DirEntry) (string, bool) {
-	if !d.IsDir() && d.Name() == "go.mod" {
-		// If the dir contains 'go.mod', the subdirs don't need to be
-		// watched. go will always try to read 'go.mod' when reading a
-		// cached dep
-		return filepath.Dir(path), true
-	} else if d.IsDir() && strings.Contains(d.Name(), "@") {
-		// if the dir contains a version of a module that is a
-		// pseudo-version, this is a dep dir
+	if d.IsDir() && strings.Contains(d.Name(), "@") {
+		// if the dir name contains a valid module version, this is a dep dir
 		_, ver, _ := strings.Cut(d.Name(), "@")
-		if strings.HasSuffix(ver, "+incompatible") || module.IsPseudoVersion(ver) {
+		if strings.HasSuffix(ver, "+incompatible") || semver.IsValid(ver) || module.IsPseudoVersion(ver) {
 			return path, true
 		}
+	} else if !d.IsDir() && d.Name() == "go.mod" {
+		// If the dir contains 'go.mod', this is a dep dir
+		return filepath.Dir(path), true
 	}
 
 	return "", false
