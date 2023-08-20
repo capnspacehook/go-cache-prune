@@ -49,8 +49,9 @@ func main() {
 
 func mainRetCode() int {
 	if err := mainErr(); err != nil {
-		if code, ok := err.(errJustExit); ok {
-			return int(code)
+		var exitCode *errJustExit
+		if errors.As(err, &exitCode) {
+			return int(*exitCode)
 		}
 		actions.Errorf("%v", err)
 		return 1
