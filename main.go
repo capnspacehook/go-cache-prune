@@ -61,12 +61,12 @@ func mainRetCode() int {
 type config struct {
 	commit string
 
-	moduleCache  string
-	buildCache   string
-	noModCache   bool
-	noBuildCache bool
-	usePIDFile   bool
-	signalProc   bool
+	moduleCache     string
+	buildCache      string
+	pruneModCache   bool
+	pruneBuildCache bool
+	usePIDFile      bool
+	signalProc      bool
 }
 
 func parseFlags() (*config, error) {
@@ -78,8 +78,8 @@ func parseFlags() (*config, error) {
 	flag.Usage = usage
 	flag.StringVar(&cfg.moduleCache, "mod-cache", "", "path to Go module cache")
 	flag.StringVar(&cfg.buildCache, "build-cache", "", "path to Go build cache")
-	flag.BoolVar(&cfg.noBuildCache, "only-mod-cache", false, "only prune the module cache, and not the build cache")
-	flag.BoolVar(&cfg.noModCache, "only-build-cache", false, "only prune the build cache, and not the module cache")
+	flag.BoolVar(&cfg.pruneModCache, "prune-mod-cache", true, "prune the Go module cache")
+	flag.BoolVar(&cfg.pruneBuildCache, "prune-build-cache", true, "prune the Go build cache")
 	flag.BoolVar(&cfg.usePIDFile, "pid-file", true, "create a PID file")
 	flag.BoolVar(&cfg.signalProc, "signal", false, "signal a running go-cache-prune to start pruning")
 	flag.BoolVar(&printVersion, "version", false, "print version and build information and exit")
@@ -95,14 +95,14 @@ func parseFlags() (*config, error) {
 		return nil, errJustExit(0)
 	}
 
-	if cfg.noBuildCache && cfg.noModCache {
-		return nil, errors.New("-only-mod-cache and -only-build-cache are mutually exclusive")
+	if !cfg.pruneModCache && !cfg.pruneBuildCache {
+		return nil, errors.New("either -prune-mod-cache or -prune-build-cache must be true")
 	}
-	if cfg.noModCache && cfg.moduleCache != "" {
-		return nil, errors.New("-mod-cache must be unset when -only-mod-cache is set")
+	if !cfg.pruneModCache && cfg.moduleCache != "" {
+		return nil, errors.New("-mod-cache must be unset when -prune-mod-cache is false")
 	}
-	if cfg.noBuildCache && cfg.buildCache != "" {
-		return nil, errors.New("-build-cache must be unset when -only-build-cache is set")
+	if !cfg.pruneBuildCache && cfg.buildCache != "" {
+		return nil, errors.New("-build-cache must be unset when -prune-build-cache is false")
 	}
 
 	for _, buildSetting := range info.Settings {
@@ -159,13 +159,13 @@ func mainErr() error {
 	defer mainCancel()
 
 	// if the caches weren't explicitly passed, get them
-	if !cfg.noModCache && cfg.moduleCache == "" {
+	if cfg.pruneModCache && cfg.moduleCache == "" {
 		cfg.moduleCache, err = getGoEnv(mainCtx, "GOMODCACHE")
 		if err != nil {
 			return fmt.Errorf("getting GOMODCACHE: %w", err)
 		}
 	}
-	if !cfg.noBuildCache && cfg.buildCache == "" {
+	if cfg.pruneBuildCache && cfg.buildCache == "" {
 		cfg.buildCache, err = getGoEnv(mainCtx, "GOCACHE")
 		if err != nil {
 			return fmt.Errorf("getting GOCACHE: %w", err)
