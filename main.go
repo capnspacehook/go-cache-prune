@@ -48,82 +48,110 @@ func main() {
 }
 
 func mainRetCode() int {
+	if err := mainErr(); err != nil {
+		if code, ok := err.(errJustExit); ok {
+			return int(code)
+		}
+		actions.Errorf("%v", err)
+		return 1
+	}
+	return 0
+}
+
+type config struct {
+	commit string
+
+	moduleCache  string
+	buildCache   string
+	noModCache   bool
+	noBuildCache bool
+	usePIDFile   bool
+	signalProc   bool
+}
+
+func parseFlags() (*config, error) {
 	var (
-		moduleCache  string
-		buildCache   string
-		noModCache   bool
-		noBuildCache bool
-		usePIDFile   bool
-		signalProc   bool
+		cfg          config
 		printVersion bool
 	)
 
 	flag.Usage = usage
-	flag.StringVar(&moduleCache, "mod-cache", "", "path to Go module cache")
-	flag.StringVar(&buildCache, "build-cache", "", "path to Go build cache")
-	flag.BoolVar(&noBuildCache, "only-mod-cache", false, "only prune the module cache, and not the build cache")
-	flag.BoolVar(&noModCache, "only-build-cache", false, "only prune the build cache, and not the module cache")
-	flag.BoolVar(&usePIDFile, "pid-file", true, "create a PID file")
-	flag.BoolVar(&signalProc, "signal", false, "signal a running go-cache-prune to start pruning")
+	flag.StringVar(&cfg.moduleCache, "mod-cache", "", "path to Go module cache")
+	flag.StringVar(&cfg.buildCache, "build-cache", "", "path to Go build cache")
+	flag.BoolVar(&cfg.noBuildCache, "only-mod-cache", false, "only prune the module cache, and not the build cache")
+	flag.BoolVar(&cfg.noModCache, "only-build-cache", false, "only prune the build cache, and not the module cache")
+	flag.BoolVar(&cfg.usePIDFile, "pid-file", true, "create a PID file")
+	flag.BoolVar(&cfg.signalProc, "signal", false, "signal a running go-cache-prune to start pruning")
 	flag.BoolVar(&printVersion, "version", false, "print version and build information and exit")
 	flag.Parse()
 
 	info, ok := debug.ReadBuildInfo()
 	if !ok {
-		actions.Errorf("build information not found")
-		return 1
+		return nil, errors.New("build information not found")
 	}
 
 	if printVersion {
 		printVersionInfo(info)
-		return 0
+		return nil, errJustExit(0)
 	}
 
-	if noBuildCache && noModCache {
-		actions.Errorf("-only-mod-cache and -only-build-cache are mutually exclusive")
-		return 1
+	if cfg.noBuildCache && cfg.noModCache {
+		return nil, errors.New("-only-mod-cache and -only-build-cache are mutually exclusive")
 	}
-	if noModCache && moduleCache != "" {
-		actions.Errorf("-mod-cache must be unset when -only-mod-cache is set")
-		return 1
+	if cfg.noModCache && cfg.moduleCache != "" {
+		return nil, errors.New("-mod-cache must be unset when -only-mod-cache is set")
 	}
-	if noBuildCache && buildCache != "" {
-		actions.Errorf("-build-cache must be unset when -only-build-cache is set")
-		return 1
+	if cfg.noBuildCache && cfg.buildCache != "" {
+		return nil, errors.New("-build-cache must be unset when -only-build-cache is set")
+	}
+
+	for _, buildSetting := range info.Settings {
+		if buildSetting.Key == "vcs.revision" {
+			cfg.commit = buildSetting.Value
+			break
+		}
+	}
+
+	return &cfg, nil
+}
+
+type errJustExit int
+
+func (e errJustExit) Error() string { return fmt.Sprintf("exit: %d", e) }
+
+func mainErr() error {
+	cfg, err := parseFlags()
+	if err != nil {
+		return err
 	}
 
 	// signal a running go-cache-prune process if necessary
 	pidFile := filepath.Join(os.TempDir(), pidFilename)
-	if signalProc {
+	if cfg.signalProc {
 		pidBytes, err := os.ReadFile(pidFile)
 		if err != nil {
-			actions.Errorf("reading PID file: %v", err)
-			return 1
+			return fmt.Errorf("reading PID file: %w", err)
 		}
 		pid, err := strconv.Atoi(string(pidBytes))
 		if err != nil {
-			actions.Errorf("parsing PID from PID file: %v", err)
-			return 1
+			return fmt.Errorf("parsing PID from PID file: %w", err)
 		}
 
 		p, _ := os.FindProcess(pid) // always succeeds for Unix systems
 		if err := p.Signal(unix.SIGHUP); err != nil {
-			actions.Errorf("signaling go-cache-prune process: %v", err)
-			return 1
+			return fmt.Errorf("signaling go-cache-prune process: %w", err)
 		}
 
 		if _, err := p.Wait(); err != nil {
-			actions.Errorf("waiting for signaling go-cache-prune process to complete: %v", err)
-			return 1
+			return fmt.Errorf("waiting for signaling go-cache-prune process to complete: %w", err)
 		}
 
-		return 0
+		return nil
 	}
 
-	if usePIDFile {
+	if cfg.usePIDFile {
 		if _, err := os.Stat(pidFile); err == nil {
-			actions.Errorf("go-cache-prune is already running")
-			return 1
+			return errors.New("go-cache-prune is already running")
 		}
 	}
 
@@ -131,29 +159,25 @@ func mainRetCode() int {
 	defer mainCancel()
 
 	// if the caches weren't explicitly passed, get them
-	var err error
-	if !noModCache && moduleCache == "" {
-		moduleCache, err = getGoEnv(mainCtx, "GOMODCACHE")
+	if !cfg.noModCache && cfg.moduleCache == "" {
+		cfg.moduleCache, err = getGoEnv(mainCtx, "GOMODCACHE")
 		if err != nil {
-			actions.Errorf("getting GOMODCACHE: %v", err)
-			return 1
+			return fmt.Errorf("getting GOMODCACHE: %w", err)
 		}
 	}
-	if !noBuildCache && buildCache == "" {
-		buildCache, err = getGoEnv(mainCtx, "GOCACHE")
+	if !cfg.noBuildCache && cfg.buildCache == "" {
+		cfg.buildCache, err = getGoEnv(mainCtx, "GOCACHE")
 		if err != nil {
-			actions.Errorf("getting GOCACHE: %v", err)
-			return 1
+			return fmt.Errorf("getting GOCACHE: %w", err)
 		}
 	}
 
-	if usePIDFile {
+	if cfg.usePIDFile {
 		// create PID file
 		pidBytes := []byte(strconv.Itoa(os.Getpid()))
 		err := os.WriteFile(pidFile, pidBytes, 0o440)
 		if err != nil {
-			actions.Errorf("creating PID file: %v", err)
-			return 1
+			return fmt.Errorf("creating PID file: %w", err)
 		}
 		defer os.Remove(pidFile)
 	}
@@ -162,40 +186,30 @@ func mainRetCode() int {
 	watchCtx, watchCancel := signal.NotifyContext(mainCtx, unix.SIGHUP)
 	defer watchCancel()
 
-	// log current version and commit
-	var commit string
-	for _, buildSetting := range info.Settings {
-		if buildSetting.Key == "vcs.revision" {
-			commit = buildSetting.Value
-			break
-		}
-	}
-	actions.Infof("starting %s version=%s commit=%s", projectName, version, commit)
+	actions.Infof("starting %s version=%s commit=%s", projectName, version, cfg.commit)
 
-	modFiles, buildFiles, err := watchCaches(watchCtx, moduleCache, buildCache)
+	modFiles, buildFiles, err := watchCaches(watchCtx, cfg.moduleCache, cfg.buildCache)
 	if err != nil {
-		actions.Errorf("watching caches: %v", err)
-		return 1
+		return fmt.Errorf("watching caches: %w", err)
 	}
 	actions.EndGroup()
 
 	if mainCtx.Err() != nil {
 		actions.Infof("signal received, shutting down without pruning caches")
-		return 2
+		return errJustExit(2)
 	}
 
 	if len(modFiles) == 0 && len(buildFiles) == 0 {
 		actions.Infof("no cached files were used, nothing to do")
-		return 2
+		return errJustExit(2)
 	}
 
-	err = pruneCaches(modFiles, buildFiles, moduleCache, buildCache)
+	err = pruneCaches(modFiles, buildFiles, cfg.moduleCache, cfg.buildCache)
 	if err != nil {
-		actions.Errorf("pruning caches: %v", err)
-		return 1
+		return fmt.Errorf("pruning caches: %w", err)
 	}
 
-	return 0
+	return nil
 }
 
 func getGoEnv(ctx context.Context, name string) (string, error) {
