@@ -370,9 +370,12 @@ func pruneCaches(modFiles, buildFiles usedCacheFiles, modCache, buildCache strin
 
 	newWalkFunc := func(root string, isModCache bool, deletedCounter *uint) fs.WalkDirFunc {
 		return func(path string, d fs.DirEntry, err error) error {
-			// ignore file not found errors, most will be because
-			// module cache dirs were recursively deleted
-			if err != nil && (isModCache && !errors.Is(err, os.ErrNotExist)) {
+			if err != nil {
+				// ignore file not found errors, most will be because
+				// module cache dirs were recursively deleted
+				if isModCache && errors.Is(err, os.ErrNotExist) {
+					return nil
+				}
 				actions.Warningf("walking %q: %v", path, err)
 				return nil
 			}
