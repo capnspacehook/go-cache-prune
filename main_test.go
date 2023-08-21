@@ -24,6 +24,7 @@ func TestBuildCache(t *testing.T) {
 	t.Run("empty cache", func(t *testing.T) {
 		doPrune := startWatching(t, ctx, buildCache, false)
 		filesDeleted := doPrune()
+		// no files should be deleted, build cache is empty
 		if filesDeleted != 0 {
 			t.Fatalf("expected 0 files to be deleted, got %d", filesDeleted)
 		}
@@ -33,11 +34,11 @@ func TestBuildCache(t *testing.T) {
 		doPrune := startWatching(t, ctx, buildCache, false)
 
 		out := runGoCommand(t, ctx, "testdata/first", "go", "build", "-v", "-o", tempDir)
-		if len(out) == 0 {
-			t.Fatalf("build cache wasn't used")
-		}
+		cacheWasNotUsed(t, out)
 
 		filesDeleted := doPrune()
+		// no files should be deleted, the build cache should contain
+		// only the results of the one watched build
 		if filesDeleted != 0 {
 			t.Fatalf("expected 0 files to be deleted, got %d", filesDeleted)
 		}
@@ -45,45 +46,35 @@ func TestBuildCache(t *testing.T) {
 
 	t.Run("prune cache", func(t *testing.T) {
 		out := runGoCommand(t, ctx, "testdata/first", "go", "build", "-v", "-o", tempDir)
-		if len(out) != 0 {
-			t.Fatalf("build cache should be used")
-		}
+		cacheWasUsed(t, out)
 
 		doPrune := startWatching(t, ctx, buildCache, false)
 
 		out = runGoCommand(t, ctx, "testdata/second", "go", "build", "-v", "-o", tempDir)
-		if len(out) == 0 {
-			t.Fatalf("build cache wasn't used")
-		}
+		cacheWasNotUsed(t, out)
 
 		filesDeleted := doPrune()
+		// cached build files of the 'first' module should be deleted,
+		// it's build was not watched
 		if filesDeleted == 0 {
 			t.Fatalf("expected some files to be deleted, got %d", filesDeleted)
 		}
 
 		out = runGoCommand(t, ctx, "testdata/second", "go", "build", "-v", "-o", tempDir)
-		if len(out) != 0 {
-			t.Fatalf("build cache should be used")
-		}
+		cacheWasUsed(t, out)
 
 		out = runGoCommand(t, ctx, "testdata/first", "go", "build", "-v", "-o", tempDir)
-		if len(out) == 0 {
-			t.Fatalf("build cache wasn't used")
-		}
+		cacheWasNotUsed(t, out)
 	})
 
 	t.Run("prune unneeded files", func(t *testing.T) {
 		doPrune := startWatching(t, ctx, buildCache, false)
 
 		out := runGoCommand(t, ctx, "testdata/first", "go", "build", "-v", "-o", tempDir)
-		if len(out) != 0 {
-			t.Fatalf("build cache should be used")
-		}
+		cacheWasUsed(t, out)
 
 		out = runGoCommand(t, ctx, "testdata/second", "go", "build", "-v", "-o", tempDir)
-		if len(out) != 0 {
-			t.Fatalf("build cache should be used")
-		}
+		cacheWasUsed(t, out)
 
 		// Even though both modules were built while go-cache-prune was
 		// watching, there are still apparently unneeded files that when
@@ -95,17 +86,16 @@ func TestBuildCache(t *testing.T) {
 		}
 
 		out = runGoCommand(t, ctx, "testdata/first", "go", "build", "-v", "-o", tempDir)
-		if len(out) != 0 {
-			t.Fatalf("build cache should be used")
-		}
+		cacheWasUsed(t, out)
 
 		out = runGoCommand(t, ctx, "testdata/second", "go", "build", "-v", "-o", tempDir)
-		if len(out) != 0 {
-			t.Fatalf("build cache should be used")
-		}
+		cacheWasUsed(t, out)
 	})
 }
 
+// 'go' is always passed for command, but it makes calls much easier to read
+//
+//nolint:unparam
 func runGoCommand(t *testing.T, ctx context.Context, workingDir, command string, args ...string) []byte {
 	t.Helper()
 
@@ -145,5 +135,27 @@ func startWatching(t *testing.T, ctx context.Context, cacheDir string, isModCach
 		}
 
 		return pruneCache(cacheDir, isModCache, usedFiles)
+	}
+}
+
+func cacheWasNotUsed(t *testing.T, output []byte) {
+	t.Helper()
+
+	// output of 'go build -v' will be empty if all modules were read
+	// from the module cache and not downloaded and if all packages
+	// were read from the build cache and not compiled
+	if len(output) == 0 {
+		t.Fatalf("cache was used, expected it not to be used")
+	}
+}
+
+func cacheWasUsed(t *testing.T, output []byte) {
+	t.Helper()
+
+	// output of 'go build -v' will be non-empty if any modules were
+	// downloaded and not read from the module cache or if any packages
+	// were compiled and not read from the build cache
+	if len(output) != 0 {
+		t.Fatalf("cache was not used, expected it to be used")
 	}
 }
