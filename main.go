@@ -15,8 +15,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/fsnotify/fsnotify"
 	actions "github.com/sethvargo/go-githubactions"
-	"github.com/tywkeene/go-fsevents"
 	"golang.org/x/mod/module"
 	"golang.org/x/mod/semver"
 	"golang.org/x/sys/unix"
@@ -271,12 +271,18 @@ func watchCaches(ctx context.Context, modCache, buildCache string) (usedCacheFil
 func watchCache(ctx context.Context, isModCache bool, dir string) (usedCacheFiles, error) {
 	actions.Infof("creating watches for cache dir %q", dir)
 
-	watcher, err := fsevents.NewWatcher()
+	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, fmt.Errorf("creating file watcher: %w", err)
 	}
+	defer func() {
+		err := watcher.Close()
+		if err != nil {
+			actions.Warningf("closing file watchers: %v", err)
+		}
+	}()
 
-	mask := fsevents.Accessed | fsevents.Create
+	flags := uint32(unix.IN_ACCESS | unix.IN_CREATE)
 	err = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -285,22 +291,16 @@ func watchCache(ctx context.Context, isModCache bool, dir string) (usedCacheFile
 		if isModCache {
 			depDir, ok := dependencyDir(path, d)
 			if ok {
-				_, err := watcher.AddDescriptor(depDir, mask)
+				err := watcher.AddWith(depDir, fsnotify.WithInotifyFlags(flags))
 				if err != nil {
-					// we may attempt to add descriptors for the same
-					// dirs more than once due to how we match on 'go.mod',
-					// but this won't adversely effect anything so ignore
-					// the error
-					if !errors.Is(err, fsevents.ErrDescAlreadyExists) {
-						return fmt.Errorf("adding watch for %q: %w", depDir, err)
-					}
+					return fmt.Errorf("adding watch for %q: %w", depDir, err)
 				}
 			}
 
 			actions.Debugf("added watch for %q", depDir)
 			return nil
 		} else if d.IsDir() {
-			_, err := watcher.AddDescriptor(path, mask)
+			err := watcher.AddWith(path, fsnotify.WithInotifyFlags(flags))
 			if err != nil {
 				return fmt.Errorf("adding watch for %q: %w", path, err)
 			}
@@ -313,20 +313,7 @@ func watchCache(ctx context.Context, isModCache bool, dir string) (usedCacheFile
 		return nil, fmt.Errorf("walking %q: %w", dir, err)
 	}
 
-	if err := watcher.StartAll(); err != nil {
-		return nil, fmt.Errorf("starting to watch files: %w", err)
-	}
-	defer func() {
-		err := watcher.StopAll()
-		if err != nil {
-			actions.Warningf("stopping file watchers: %v", err)
-		}
-	}()
-
-	go watcher.Watch()
-
 	usedFiles := make(usedCacheFiles)
-
 	for {
 		select {
 		case event, ok := <-watcher.Events:
@@ -334,21 +321,17 @@ func watchCache(ctx context.Context, isModCache bool, dir string) (usedCacheFile
 				return nil, errors.New("file watcher event channel closed")
 			}
 
-			created := fsevents.CheckMask(fsevents.Create, event.RawEvent.Mask)
-			actions.Debugf("got event: path=%q created=%t", event.Path, created)
+			actions.Debugf("got event: path=%q op=%s", event.Name, event.Op)
 
-			isDirEvent := event.IsDirEvent()
+			isDirEvent := event.Mask&unix.IN_ISDIR == unix.IN_ISDIR
 			if isModCache && isDirEvent || !isModCache && !isDirEvent {
-				usedFiles[event.Path] = struct{}{}
+				usedFiles[event.Name] = struct{}{}
 			}
-			if !isModCache && isDirEvent && event.IsDirCreated() {
-				dscr, err := watcher.AddDescriptor(event.Path, mask)
+			if !isModCache && isDirEvent && event.Mask&unix.IN_CREATE == unix.IN_CREATE {
+				err := watcher.AddWith(event.Name, fsnotify.WithInotifyFlags(flags))
 				if err != nil {
-					actions.Errorf("adding watch for %q: %v", event.Path, err)
+					actions.Errorf("adding watch for %q: %v", event.Name, err)
 					continue
-				}
-				if err := dscr.Start(); err != nil {
-					actions.Errorf("starting to watch directory %q: %v", event.Path, err)
 				}
 			}
 		case err, ok := <-watcher.Errors:
